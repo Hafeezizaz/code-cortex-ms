@@ -1,0 +1,67 @@
+name: Restore missing java/javascript folders (one-off)
+
+# The team zip this repo was imported from had every folder named "java" or "javascript" stripped in
+# transit (likely an email/security filter). This one-off workflow copies exactly those folders from the
+# ORIGINAL repository on GitHub's own servers, so no corporate filter is involved, verifies the vendored
+# parser files against provenance/CODECORTEX_062_THIRD_PARTY_SHA256SUMS.tsv, and commits them.
+# Run it once from the Actions tab, then delete this file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Original repo, e.g. someone/codecortex (owner/name, no https://)"
+        required: true
+      source_ref:
+        description: "Branch or tag to copy from"
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the original repository
+        run: git clone --depth 1 --branch "${{ inputs.source_ref }}" "https://github.com/${{ inputs.source_repo }}.git" /tmp/original
+
+      - name: Copy only the stripped folders
+        run: |
+          set -eu
+          dirs="third_party/deps/java third_party/deps/javascript queries/java queries/javascript
+                test/callformfix/java test/callformfix/javascript bench/h4fixtures/java"
+          # Plus any other java/javascript-named directory the original has and this repo lacks.
+          extra="$( cd /tmp/original && find . -type d \( -name java -o -name javascript \) -not -path './.git/*' | sed 's|^\./||' )"
+          for d in $dirs $extra; do
+            if [ -d "/tmp/original/$d" ] && [ ! -d "$d" ]; then
+              mkdir -p "$( dirname "$d" )"; cp -R "/tmp/original/$d" "$d"; echo "restored $d"
+            elif [ -d "$d" ]; then echo "already present: $d"
+            else echo "::warning::original has no $d"; fi
+          done
+
+      - name: Verify vendored parser files against the project's checksum manifest
+        run: |
+          set -eu
+          bad=0
+          while IFS=$'\t' read -r path sum; do
+            [ "$path" = path ] && continue
+            f="third_party/$path"
+            if [ ! -f "$f" ]; then echo "MISSING $f"; bad=1; continue; fi
+            got="$( sha256sum "$f" | cut -d' ' -f1 )"
+            [ "$got" = "$sum" ] || { echo "MISMATCH $f"; bad=1; }
+          done < provenance/CODECORTEX_062_THIRD_PARTY_SHA256SUMS.tsv
+          [ "$bad" = 0 ] && echo "all third_party files match the manifest"
+          exit $bad
+
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898729+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && { echo "nothing to restore"; exit 0; }
+          git commit -m "Restore java/javascript folders stripped from the team zip (from ${{ inputs.source_repo }}@${{ inputs.source_ref }})"
+          git push
