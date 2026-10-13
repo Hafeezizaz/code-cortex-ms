@@ -141,7 +141,7 @@ jobs:
       - name: Build (profile-guided — instrument, train, merge, optimize)
         if: ${{ matrix.pgo }}
         run: |
-          scripts/pgobuild.sh --cmake-extra -DCMAKE_BUILD_TYPE=Release
+          bash scripts/pgobuild.sh --cmake-extra -DCMAKE_BUILD_TYPE=Release
           mkdir -p build
           cp build_pgo/codecortex build/codecortex
 
