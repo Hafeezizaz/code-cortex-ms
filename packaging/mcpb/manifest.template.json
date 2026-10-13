@@ -4,9 +4,9 @@
   "display_name": "CodeCortex",
   "version": "0.0.0",
   "description": "Helps Claude understand your whole codebase: find the right code, see what a change affects, pick the tests to run, and show what it did.",
-  "long_description": "CodeCortex runs locally on your computer and gives Claude a map of your code project.\n\n- **Find the right code fast** instead of reading hundreds of files\n- **See the blast radius** of a change before it is made\n- **Know which tests to run** for a change\n- **See what Claude did** in a local dashboard at http://127.0.0.1:7331\n\nNothing leaves your machine. After installing, ask Claude: *Show CodeCortex status*.\n\nPackaged by Hafeez Izaz. Based on the open-source CodeCortex project by Saurabh Verma (MIT licence).",
+  "long_description": "CodeCortex runs locally on your computer and gives Claude a map of your code project.\n\n- **Find the right code fast** instead of reading hundreds of files\n- **See the blast radius** of a change before it is made\n- **Know which tests to run** for a change\n- **See what Claude did** in a local dashboard at http://127.0.0.1:7331\n\nNothing leaves your machine. After installing, ask Claude: *Show CodeCortex status*.\n\nCreated by Saurabh Verma. Windows build, Claude extension, token & cost tracking and multi-project support contributed by Hafeez Izaz.",
   "author": {
-    "name": "Hafeez Izaz"
+    "name": "Saurabh Verma"
   },
   "icon": "icon.png",
   "license": "MIT",
