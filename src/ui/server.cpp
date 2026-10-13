@@ -21,10 +21,9 @@
 #include <string_view>
 #include <vector>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+// Sockets go through the project's os:: layer (src/infra/os.h), as src/mcpserver.h's HTTP server does, so the
+// dashboard server builds on Windows (Winsock) as well as POSIX. os.h brings the POSIX socket headers itself.
+#include "infra/os.h"
 
 namespace rw::ui
 {
@@ -119,11 +118,7 @@ bool sendAll( int fd, std::string_view data ) noexcept
     std::size_t sent = 0;
     while( sent < data.size() )
     {
-#ifdef MSG_NOSIGNAL
-        const ssize_t n = ::send( fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL );
-#else
-        const ssize_t n = ::send( fd, data.data() + sent, data.size() - sent, 0 );
-#endif
+        const rw::os::ssize_t n = rw::os::send( fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL );
         if( n <= 0 ) return false;
         sent += static_cast<std::size_t>( n );
     }
@@ -392,23 +387,23 @@ int runServer( const ServerConfig& cfg )
         return 1;
     }
 
-    const int listenFd = ::socket( AF_INET, SOCK_STREAM, 0 );
+    const int listenFd = rw::os::socket( AF_INET, SOCK_STREAM, 0 );
     if( listenFd < 0 ) { std::fprintf( stderr, "codecortex: UI socket failed: %s\n", std::strerror( errno ) ); return 1; }
     int one = 1;
-    ::setsockopt( listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof( one ) );
-    sockaddr_in addr{};
+    rw::os::setsockopt( listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof( one ) );
+    rw::os::sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons( static_cast<std::uint16_t>( cfg.port ) );
-    addr.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
-    if( ::bind( listenFd, reinterpret_cast<sockaddr*>( &addr ), sizeof( addr ) ) != 0 )
+    if( rw::os::inet_pton( AF_INET, "127.0.0.1", &addr.sin_addr ) != 1
+        || rw::os::bind( listenFd, reinterpret_cast<rw::os::sockaddr*>( &addr ), sizeof( addr ) ) != 0 )
     {
         std::fprintf( stderr, "codecortex: UI bind 127.0.0.1:%d failed: %s\n", cfg.port, std::strerror( errno ) );
-        ::close( listenFd ); return 1;
+        rw::os::close( listenFd ); return 1;
     }
-    if( ::listen( listenFd, 16 ) != 0 )
+    if( rw::os::listen( listenFd, 16 ) != 0 )
     {
         std::fprintf( stderr, "codecortex: UI listen failed: %s\n", std::strerror( errno ) );
-        ::close( listenFd ); return 1;
+        rw::os::close( listenFd ); return 1;
     }
 
     const auto assets = assetsDir( cfg );
@@ -418,13 +413,14 @@ int runServer( const ServerConfig& cfg )
 
     for( ;; )
     {
-        const int fd = ::accept( listenFd, nullptr, nullptr );
+        const int fd = rw::os::accept( listenFd, nullptr, nullptr );
         if( fd < 0 ) { if( errno == EINTR ) continue; break; }
+        rw::os::setsockopt_nosigpipe( fd, &one, sizeof( one ) );   // a browser closing early must not kill the process
         std::string req;
         std::array<char, 8192> buf{};
         while( req.find( "\r\n\r\n" ) == std::string::npos && req.size() < kMaxRequestBytes )
         {
-            const ssize_t n = ::recv( fd, buf.data(), buf.size(), 0 );
+            const rw::os::ssize_t n = rw::os::recv( fd, buf.data(), buf.size(), 0 );
             if( n <= 0 ) break;
             req.append( buf.data(), static_cast<std::size_t>( n ) );
         }
@@ -557,9 +553,9 @@ int runServer( const ServerConfig& cfg )
                 else respond( fd, "200 OK", type, body );
             }
         }
-        ::close( fd );
+        rw::os::close( fd );
     }
-    ::close( listenFd );
+    rw::os::close( listenFd );
     return 1;
 }
 
