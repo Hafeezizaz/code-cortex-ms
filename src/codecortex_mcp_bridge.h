@@ -7,7 +7,9 @@
 #include "project_identity.h"
 #include "telemetry/collector.h"
 #include "telemetry/session_meter.h"
+#include "ui/server.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -40,10 +42,21 @@ inline std::vector<std::string> workspaceFolders( std::string_view root )
     return out;
 }
 
+// The folder the dashboard was started on (the FIRST folder the user listed — main.cpp's rootPath). A workspace
+// key orders folders by label instead, so without this the bridge would file events under a different project
+// than the dashboard shows, and they would be hidden behind the dashboard's project filter.
+inline std::string& workspacePrimaryFolder()
+{
+    static std::string folder;
+    return folder;
+}
+
 inline std::string primaryRoot( std::string_view root )
 {
     const auto sep = root.find( '\x1f' );
-    return std::string( sep == std::string_view::npos ? root : root.substr( 0, sep ) );
+    if( sep == std::string_view::npos ) return std::string( root );
+    if( !workspacePrimaryFolder().empty() ) return workspacePrimaryFolder();
+    return std::string( root.substr( 0, sep ) );
 }
 
 inline std::string displayRoots( std::string_view root )
@@ -65,7 +78,9 @@ inline std::string telemetryPathFor( std::string_view rootOrKey )
 inline std::string dashboardUrl()
 {
     if( const char* p = std::getenv( "CODECORTEX_DASHBOARD_URL" ); p && *p ) return p;
-    return "http://127.0.0.1:7331";
+    // The port this process's dashboard actually bound (it moves past 7331 when an older CodeCortex still holds it).
+    const int port = rw::ui::activePort().load();
+    return "http://127.0.0.1:" + std::to_string( port > 0 ? port : 7331 );
 }
 
 inline std::size_t matchingClose( const std::string& s, std::size_t open, char l, char r )
@@ -576,6 +591,7 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
                            : !policy.pinnedRoot.empty() ? policy.pinnedRoot
                            : !policy.defaultRoot.empty() ? policy.defaultRoot : policy.assumedRoot;
     std::int64_t coveredBytes = 0, coveredFiles = 0;
+    std::vector<std::pair<std::string, int>> perFolder;   // multi-project: which folder this answer is mostly about
     static std::unordered_set<std::string> creditedFiles;   // each file is credited once per session, not per answer
     if( ok && !root.empty() )
     {
@@ -593,7 +609,13 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
                     if( std::filesystem::is_regular_file( candidate, ec ) && !ec ) { p = candidate; break; }
                     ec.clear();
                 }
-                if( !p.empty() ) break;
+                if( !p.empty() )
+                {
+                    bool found = false;
+                    for( auto& pf : perFolder ) if( pf.first == folder ) { ++pf.second; found = true; }
+                    if( !found ) perFolder.emplace_back( folder, 1 );
+                    break;
+                }
             }
             if( p.empty() ) return;
             const auto sz = std::filesystem::file_size( p, ec );
@@ -635,7 +657,16 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
         {
             rw::telemetry::Event e;
             e.type = rw::telemetry::EventType::ContextReturned;
-            decorateEvent( e, root, ctx.activeRunId, "derived" );
+            // In a multi-project workspace, file the answer under the project most of its files belong to, so
+            // the dashboard's per-project view can show it; otherwise under the workspace's first folder.
+            std::string attributed = root;
+            if( perFolder.size() > 0 && workspaceFolders( root ).size() > 1 )
+            {
+                const auto best = std::max_element( perFolder.begin(), perFolder.end(),
+                                                    []( const auto& a, const auto& b ) { return a.second < b.second; } );
+                attributed = best->first;
+            }
+            decorateEvent( e, attributed, ctx.activeRunId, "derived" );
             e.target = name;
             e.detail = detail;
             e.toolCallId = callId;
@@ -698,6 +729,7 @@ inline int runCodeCortexMcp( int topK, bool stable, bool noRedact,
     {
         std::string wsErr; const std::string key = mcpWorkspaceKey( roots, wsErr );
         if( !key.empty() ) defaultRoot = mcpCanonRoot( key );
+        workspacePrimaryFolder() = mcpCanonRoot( root.empty() ? roots.front() : root );
     }
     else if( !root.empty() ) defaultRoot = mcpCanonRoot( root );
 

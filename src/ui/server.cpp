@@ -205,7 +205,8 @@ std::string healthJson( const ServerConfig& cfg )
                     + ",\"deployment\":{\"local_first\":true,\"mcp_active\":" + std::string( cfg.mcpActive ? "true" : "false" )
                     + ",\"mcp_transport\":" + jsonString( cfg.mcpTransport )
                     + ",\"mcp_local_only\":" + std::string( cfg.mcpLocalOnly ? "true" : "false" )
-                    + ",\"dashboard_bind\":\"127.0.0.1\",\"dashboard_port\":" + std::to_string( cfg.port ) + "}"
+                    + ",\"dashboard_bind\":\"127.0.0.1\",\"dashboard_port\":" + std::to_string( activePort().load() > 0 ? activePort().load() : cfg.port ) + "}"
+                    + ",\"workspace_roots\":" + [&]{ std::string a = "["; for( const auto& r : cfg.workspaceRoots ) { if( a.size() > 1 ) a += ","; a += jsonString( r ); } return a + "]"; }()
                     + ",\"capabilities\":{\"code_intelligence\":true,\"graph\":true,\"impact\":true,\"test_selection\":true,\"proof_checks\":true,\"host_observation_conditional\":true,\"token_usage_conditional\":true}"
                     + ",\"edition\":" + jsonString( profile.edition )
                     + ",\"organization\":" + jsonString( profile.organization )
@@ -387,19 +388,29 @@ int runServer( const ServerConfig& cfg )
         return 1;
     }
 
-    const int listenFd = rw::os::socket( AF_INET, SOCK_STREAM, 0 );
-    if( listenFd < 0 ) { std::fprintf( stderr, "codecortex: UI socket failed: %s\n", std::strerror( errno ) ); return 1; }
-    int one = 1;
-    rw::os::setsockopt( listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof( one ) );
-    rw::os::sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons( static_cast<std::uint16_t>( cfg.port ) );
-    if( rw::os::inet_pton( AF_INET, "127.0.0.1", &addr.sin_addr ) != 1
-        || rw::os::bind( listenFd, reinterpret_cast<rw::os::sockaddr*>( &addr ), sizeof( addr ) ) != 0 )
+    int listenFd = -1;
+    int port = cfg.port;
+    for( int attempt = 0; attempt < 10 && port <= 65535; ++attempt, ++port )
     {
-        std::fprintf( stderr, "codecortex: UI bind 127.0.0.1:%d failed: %s\n", cfg.port, std::strerror( errno ) );
-        rw::os::close( listenFd ); return 1;
+        listenFd = rw::os::socket( AF_INET, SOCK_STREAM, 0 );
+        if( listenFd < 0 ) { std::fprintf( stderr, "codecortex: UI socket failed: %s\n", std::strerror( errno ) ); return 1; }
+        int one = 1;
+        // POSIX SO_REUSEADDR only skips TIME_WAIT, never a live listener; os:: maps it to SO_EXCLUSIVEADDRUSE on
+        // Windows. Either way a port another running dashboard holds still fails to bind, which is what the
+        // fallback below relies on.
+        rw::os::setsockopt( listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof( one ) );
+        rw::os::sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons( static_cast<std::uint16_t>( port ) );
+        if( rw::os::inet_pton( AF_INET, "127.0.0.1", &addr.sin_addr ) == 1
+            && rw::os::bind( listenFd, reinterpret_cast<rw::os::sockaddr*>( &addr ), sizeof( addr ) ) == 0 )
+            break;
+        std::fprintf( stderr, "codecortex: UI port %d is busy (%s)%s\n", port, std::strerror( errno ),
+                      attempt < 9 ? ", trying the next one" : "" );
+        rw::os::close( listenFd ); listenFd = -1;
     }
+    if( listenFd < 0 ) { std::fprintf( stderr, "codecortex: no free UI port in %d..%d\n", cfg.port, cfg.port + 9 ); return 1; }
+    int one = 1;
     if( rw::os::listen( listenFd, 16 ) != 0 )
     {
         std::fprintf( stderr, "codecortex: UI listen failed: %s\n", std::strerror( errno ) );
@@ -409,7 +420,8 @@ int runServer( const ServerConfig& cfg )
     const auto assets = assetsDir( cfg );
     rw::evidence::EvidenceService evidence( cfg.telemetryPath );
     evidence.refresh();
-    std::fprintf( stderr, "codecortex: Developer Console on http://127.0.0.1:%d (loopback only)\n", cfg.port );
+    activePort().store( port );
+    std::fprintf( stderr, "codecortex: Developer Console on http://127.0.0.1:%d (loopback only)\n", port );
 
     for( ;; )
     {
