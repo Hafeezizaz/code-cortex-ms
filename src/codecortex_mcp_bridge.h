@@ -6,12 +6,15 @@
 #include "memory/memory_service_client.h"
 #include "project_identity.h"
 #include "telemetry/collector.h"
+#include "telemetry/session_meter.h"
 
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace rw
@@ -97,6 +100,12 @@ struct BridgeContext
     std::string activeTask;
     std::string activeRoot;
     bool runStarted = false;
+    // The tools/call being dispatched right now (set by the dispatch wrapper, read by recordTool) so the
+    // ToolCall event carries the JSON-RPC id and the retry-chain fields without threading them through
+    // every branch of the core dispatcher.
+    std::string pendingCallId;
+    std::int64_t pendingAttempt = 0;
+    std::string pendingRetryOf;
 };
 
 inline BridgeContext& bridgeContext()
@@ -216,6 +225,10 @@ inline void recordTool( std::string_view telemetryPath, std::string_view root, s
     e.detail = std::string( detail );
     e.durationMs = durationMs;
     e.success = success;
+    const auto& ctx = bridgeContext();
+    e.toolCallId = ctx.pendingCallId;
+    e.attemptNumber = ctx.pendingAttempt;
+    e.retryOfToolCallId = ctx.pendingRetryOf;
     c.record( e );
 }
 
@@ -258,9 +271,58 @@ inline void recordSemanticEvent( std::string_view telemetryPath, std::string_vie
     }
 }
 
-inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int topK, bool stable, bool noRedact,
-                                                     const McpDispatchPolicy& policy,
-                                                     std::string_view telemetryPath = {} )
+// One-paragraph token summary for codecortex_status. Every number is an ESTIMATE of CodeCortex's own
+// answers (the agent's full conversation usage is only known to the host; see the dashboard).
+inline std::string sessionTokenSummary()
+{
+    const auto& m = rw::telemetry::meter::sessionMeter();
+    std::string out = "Tokens (this session, CodeCortex answers only, estimated): "
+        + std::to_string( m.answersTokens ) + " sent to the agent";
+    if( m.avoidedTokens > 0 )
+        out += "; the files those answers cover would have cost ~" + std::to_string( m.avoidedTokens ) + " to read whole";
+    if( m.repeatsSuppressed > 0 )
+        out += "; " + std::to_string( m.repeatsSuppressed ) + " repeated answer(s) not resent (~"
+             + std::to_string( m.repeatTokensSaved ) + " tokens saved)";
+    return out;
+}
+
+// Default answer budget for the orientation tools when the agent sets none. The upstream default (6000 for
+// explore) is sized for one big orientation; most agent calls need far less, and every answer stays fully
+// truncation-disclosed, so the agent can ask again with a larger budget_tokens. 0 = keep upstream defaults.
+inline long long defaultBudgetTokens()
+{
+    if( const char* p = std::getenv( "CODECORTEX_DEFAULT_BUDGET_TOKENS" ); p && *p )
+    {
+        char* end = nullptr; const long long v = std::strtoll( p, &end, 10 );
+        if( end != p && v >= 0 ) return v;
+    }
+    return 3000;
+}
+
+inline std::string withDefaultBudget( const std::string& line, std::string_view tool, const std::string& argsObj )
+{
+    if( tool != "code_search" && tool != "trace_explain" && tool != "explore" && tool != "pack_task" && tool != "from_trace" )
+        return line;
+    const long long budget = defaultBudgetTokens();
+    if( budget <= 0 || argsObj.empty() || argsObj.front() != '{' ) return line;
+    if( argsObj.find( "\"budget_tokens\"" ) != std::string::npos ) return line;   // the agent chose one
+    const auto at = line.find( argsObj );
+    if( at == std::string::npos ) return line;
+    const bool empty = argsObj.find_first_not_of( " \t\r\n", 1 ) == argsObj.size() - 1;
+    std::string out = line;
+    out.insert( at + 1, "\"budget_tokens\":" + std::to_string( budget ) + ( empty ? "" : "," ) );
+    return out;
+}
+
+inline std::string unquoteId( std::string_view raw )
+{
+    if( raw.size() >= 2 && raw.front() == '"' && raw.back() == '"' ) return std::string( raw.substr( 1, raw.size() - 2 ) );
+    return std::string( raw );
+}
+
+inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line, int topK, bool stable, bool noRedact,
+                                                         const McpDispatchPolicy& policy,
+                                                         std::string_view telemetryPath = {} )
 {
     const std::string method = mcpdetail::findString( line, "method" );
     if( method == "initialize" )
@@ -348,7 +410,8 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
             "Run: " + ( bridgeContext().activeRunId.empty() ? std::string( "no active coding run" ) : bridgeContext().activeRunId ) + "\n"
             "Dashboard: " + dashboardUrl() + "\n"
             "MCP tools: 42 available\n"
-            "Memory: " + std::string( mh.ok ? "connected" : "unavailable" );
+            "Memory: " + std::string( mh.ok ? "connected" : "unavailable" ) + "\n"
+            + sessionTokenSummary();
         finishTelemetry( true, "status" );
         return { toolResult( id, body, false ), false, name };
     }
@@ -442,6 +505,143 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
     return r;
 }
 
+// The tools/call entry point: wraps the core dispatcher with the session meter (retry chain, repeat guard,
+// default answer budget, context/savings measurement). Everything else passes straight through.
+inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int topK, bool stable, bool noRedact,
+                                                     const McpDispatchPolicy& policy,
+                                                     std::string_view telemetryPath = {} )
+{
+    if( mcpdetail::findString( line, "method" ) != "tools/call" )
+        return dispatchCodeCortexMcpLineCore( line, topK, stable, noRedact, policy, telemetryPath );
+
+    namespace mt = rw::telemetry::meter;
+    auto& meter = mt::sessionMeter();
+    auto& ctx = bridgeContext();
+    const std::string params = mcpdetail::findObject( line, "params" );
+    const std::string argsObj = mcpdetail::findObject( params, "arguments" );
+    const std::string name = mcpStringArg( params, "name" ).value;
+    const std::string rawId = mcpdetail::findRawId( line ).token;
+    const std::string callId = unquoteId( rawId );
+
+    const mt::RetryInfo retry = meter.beginCall( name );
+    ctx.pendingCallId = callId; ctx.pendingAttempt = retry.attempt; ctx.pendingRetryOf = retry.retryOf;
+    McpDispatchResult r = dispatchCodeCortexMcpLineCore( withDefaultBudget( line, name, argsObj ),
+                                                         topK, stable, noRedact, policy, telemetryPath );
+    ctx.pendingCallId.clear(); ctx.pendingAttempt = 0; ctx.pendingRetryOf.clear();
+    if( r.isNotification || r.resp.empty() ) return r;
+
+    const bool ok = r.resp.find( "\"error\"" ) == std::string::npos && r.resp.find( "\"isError\":true" ) == std::string::npos;
+    meter.endCall( name, callId, ok, retry );
+
+    // What this answer costs the agent, and what reading the files it covers would have cost instead.
+    std::int64_t answerTokens = mt::estimateAnswerTokens( r.resp );
+    const std::string pathArg = mcpStringArg( argsObj.empty() ? params : argsObj, "path" ).value;
+    const std::string root = !pathArg.empty() ? pathArg : !ctx.activeRoot.empty() ? ctx.activeRoot
+                           : !policy.pinnedRoot.empty() ? policy.pinnedRoot
+                           : !policy.defaultRoot.empty() ? policy.defaultRoot : policy.assumedRoot;
+    std::int64_t coveredBytes = 0, coveredFiles = 0;
+    static std::unordered_set<std::string> creditedFiles;   // each file is credited once per session, not per answer
+    if( ok && !root.empty() )
+    {
+        mt::forEachPathCandidate( r.resp, 400, [&]( const std::string& rel )
+        {
+            if( coveredFiles >= 200 ) return;
+            std::error_code ec;
+            const std::filesystem::path p = std::filesystem::path( root ) / rel;
+            if( !std::filesystem::is_regular_file( p, ec ) || ec ) return;
+            const auto sz = std::filesystem::file_size( p, ec );
+            if( ec || !creditedFiles.insert( p.lexically_normal().string() ).second ) return;
+            coveredBytes += static_cast<std::int64_t>( sz ); ++coveredFiles;
+        } );
+    }
+    const std::int64_t avoided = mt::tokensForBytes( static_cast<std::uint64_t>( coveredBytes ), mt::kSourceBytesPerToken );
+
+    // Repeat guard: an identical answer to an identical read-only question is not resent the second time.
+    std::string detail = "codecortex_answer";
+    if( ok )
+    {
+        const auto body = r.resp.find( "\"result\"" );
+        const auto hit = meter.checkRepeat( name, argsObj, body == std::string::npos ? std::string_view( r.resp )
+                                                                                     : std::string_view( r.resp ).substr( body ),
+                                            callId, answerTokens );
+        if( hit.suppress )
+        {
+            const std::string note =
+                "CodeCortex: same result as call " + hit.earlierCallId + " earlier in this session (nothing changed), "
+                "so it was not resent (~" + std::to_string( hit.tokensNotResent ) + " tokens saved). "
+                "If that earlier result is no longer in your context, call this tool again with the same arguments "
+                "and the full text will be returned.";
+            r.resp = toolResult( rawId, note, false );
+            meter.repeatTokensSaved += hit.tokensNotResent;
+            ++meter.repeatsSuppressed;
+            detail = "repeat_suppressed earlier_call=" + hit.earlierCallId + " tokens_saved=" + std::to_string( hit.tokensNotResent );
+            answerTokens = mt::estimateAnswerTokens( r.resp );
+        }
+    }
+    meter.answersTokens += answerTokens;
+    meter.avoidedTokens += avoided;
+
+    if( !telemetryPath.empty() && !ctx.activeRunId.empty() && name != "codecortex_status" )
+    {
+        rw::telemetry::Collector c( telemetryPath );
+        if( c.enabled() )
+        {
+            rw::telemetry::Event e;
+            e.type = rw::telemetry::EventType::ContextReturned;
+            decorateEvent( e, root, ctx.activeRunId, "derived" );
+            e.target = name;
+            e.detail = detail;
+            e.toolCallId = callId;
+            e.success = ok;
+            e.responseBytes = static_cast<std::int64_t>( r.resp.size() );
+            e.estTokens = answerTokens;
+            e.avoidedTokensEst = avoided;
+            e.coveredFiles = coveredFiles;
+            c.record( e );
+        }
+    }
+    return r;
+}
+
+// MCP roots (Step 3 of the setup plan): when CodeCortex was started WITHOUT a project folder, ask a client
+// that supports roots which folder the user has open, and use it. An explicit folder always wins.
+inline std::string fileUriToPath( std::string_view uri )
+{
+    if( !uri.starts_with( "file://" ) ) return {};
+    std::string_view rest = uri.substr( 7 );
+    if( rest.starts_with( "localhost/" ) ) rest.remove_prefix( 9 );
+    std::string out;
+    for( std::size_t i = 0; i < rest.size(); ++i )
+    {
+        if( rest[i] == '%' && i + 2 < rest.size() )
+        {
+            auto hex = []( char c ) -> int { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+            const int hi = hex( rest[i + 1] ), lo = hex( rest[i + 2] );
+            if( hi >= 0 && lo >= 0 ) { out.push_back( static_cast<char>( hi * 16 + lo ) ); i += 2; continue; }
+        }
+        out.push_back( rest[i] );
+    }
+    // file:///C:/x -> C:/x on Windows; file:///home/x stays /home/x.
+    if( out.size() >= 3 && out[0] == '/' && std::isalpha( static_cast<unsigned char>( out[1] ) ) && out[2] == ':' ) out.erase( 0, 1 );
+    return out;
+}
+
+inline std::string firstRootPath( const std::string& responseLine )
+{
+    const std::string result = mcpdetail::findObject( responseLine, "result" );
+    const auto k = result.find( "\"uri\"" );
+    if( k == std::string::npos ) return {};
+    const auto q = result.find( '"', result.find( ':', k ) );
+    if( q == std::string::npos ) return {};
+    std::string uri;
+    for( std::size_t i = q + 1; i < result.size() && result[i] != '"'; ++i )
+    {
+        if( result[i] == '\\' && i + 1 < result.size() ) { ++i; }
+        uri.push_back( result[i] );
+    }
+    return fileUriToPath( uri );
+}
+
 inline int runCodeCortexMcp( int topK, bool stable, bool noRedact,
                              const std::string& root = {}, const std::vector<std::string>& roots = {},
                              std::string telemetryPath = {} )
@@ -457,16 +657,50 @@ inline int runCodeCortexMcp( int topK, bool stable, bool noRedact,
     McpDispatchPolicy policy{ .legendSession = &mcpStdioLegendSession() };
     policy.defaultRoot = defaultRoot;
     if( defaultRoot.empty() ) policy.assumedRoot = mcpResolveAssumedRoot();
+    const bool telemetryPinned = !telemetryPath.empty();
     if( telemetryPath.empty() ) telemetryPath = telemetryPathFor( defaultRoot.empty() ? policy.assumedRoot : defaultRoot );
+
+    const bool explicitRoot = !defaultRoot.empty();
+    bool clientHasRoots = false;
+    int rootsRequests = 0;
+    auto requestRoots = [&]()
+    {
+        const std::string req = "{\"jsonrpc\":\"2.0\",\"id\":\"ccx-roots-" + std::to_string( ++rootsRequests ) + "\",\"method\":\"roots/list\"}";
+        std::fputs( req.c_str(), stdout ); std::fputc( '\n', stdout ); std::fflush( stdout );
+    };
 
     std::string line; bool overflow = false;
     while( readByteSafeLineBounded( stdin, line, kMcpStdioLineMaxBytes, overflow ) )
     {
         if( overflow ) { emitMcpStdioLineOverflowRefusal(); continue; }
         if( line.find_first_not_of( " \t\r\n" ) == std::string::npos ) continue;
+        const std::string method = mcpdetail::findString( line, "method" );
+        if( method.empty() && mcpdetail::findRawId( line ).token.starts_with( "\"ccx-roots-" ) )
+        {
+            // The client's answer to OUR roots/list request — never dispatched as a request.
+            const std::string path = firstRootPath( line );
+            std::error_code ec;
+            if( !explicitRoot && !path.empty() && std::filesystem::is_directory( path, ec ) )
+            {
+                policy.defaultRoot = mcpCanonRoot( path );
+                policy.assumedRoot.clear();
+                bridgeContext().activeRoot = policy.defaultRoot;
+                if( !telemetryPinned ) telemetryPath = telemetryPathFor( policy.defaultRoot );
+            }
+            continue;
+        }
+        if( method == "initialize" )
+        {
+            const std::string caps = mcpdetail::findObject( mcpdetail::findObject( line, "params" ), "capabilities" );
+            clientHasRoots = caps.find( "\"roots\"" ) != std::string::npos;
+        }
         const auto r = dispatchCodeCortexMcpLine( line, topK, stable, noRedact, policy, telemetryPath );
-        if( r.isNotification ) continue;
-        std::fputs( r.resp.c_str(), stdout ); std::fputc( '\n', stdout ); std::fflush( stdout );
+        if( !r.isNotification )
+        {
+            std::fputs( r.resp.c_str(), stdout ); std::fputc( '\n', stdout ); std::fflush( stdout );
+        }
+        if( clientHasRoots && !explicitRoot && ( method == "notifications/initialized" || method == "notifications/roots/list_changed" ) )
+            requestRoots();
     }
     return 0;
 }
