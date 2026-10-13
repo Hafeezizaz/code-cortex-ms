@@ -21,8 +21,42 @@ namespace rw
 {
 namespace codecortex_mcp
 {
-inline std::string telemetryPathFor( std::string_view root )
+// Multi-project workspaces: started with 2+ folders, the engine's default root is a WORKSPACE KEY — the
+// folders' real paths, each followed by '\x1f' (mcpindex.h mcpWorkspaceKey). Everything in this bridge that
+// needs ONE real directory (project identity, telemetry file, memory scope) uses the first folder; everything
+// that should cover the whole workspace (savings measurement, codecortex_status) uses every folder.
+inline std::vector<std::string> workspaceFolders( std::string_view root )
 {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while( start < root.size() )
+    {
+        const auto sep = root.find( '\x1f', start );
+        const auto end = sep == std::string_view::npos ? root.size() : sep;
+        if( end > start ) out.emplace_back( root.substr( start, end - start ) );
+        if( sep == std::string_view::npos ) break;
+        start = sep + 1;
+    }
+    return out;
+}
+
+inline std::string primaryRoot( std::string_view root )
+{
+    const auto sep = root.find( '\x1f' );
+    return std::string( sep == std::string_view::npos ? root : root.substr( 0, sep ) );
+}
+
+inline std::string displayRoots( std::string_view root )
+{
+    const auto folders = workspaceFolders( root );
+    std::string out;
+    for( const auto& f : folders ) { if( !out.empty() ) out += " + "; out += f; }
+    return out.empty() ? std::string( root ) : out;
+}
+
+inline std::string telemetryPathFor( std::string_view rootOrKey )
+{
+    const std::string root = primaryRoot( rootOrKey );
     if( const char* p = std::getenv( "CODECORTEX_TELEMETRY_FILE" ); p && *p ) return p;
     const std::filesystem::path base( root.empty() ? "." : std::string( root ) );
     return ( base / ".codecortex" / "runs.jsonl" ).string();
@@ -138,7 +172,7 @@ inline void captureClientInfo( const std::string& line )
 inline void decorateEvent( rw::telemetry::Event& e, std::string_view root, std::string_view runId,
                            std::string_view source = "observed" )
 {
-    const auto id = rw::project::identify( root );
+    const auto id = rw::project::identify( primaryRoot( root ) );
     const auto& ctx = bridgeContext();
     e.runId.assign( runId );
     e.projectId = id.projectId;
@@ -206,7 +240,7 @@ inline std::string ensureActiveRun( std::string_view telemetryPath, std::string_
     if( !ctx.runStarted )
     {
         recordEvent( telemetryPath, root, ctx.activeRunId, rw::telemetry::EventType::RunStarted,
-                     root, task.empty() ? "implicit_mcp_task" : task, true );
+                     displayRoots( root ), task.empty() ? "implicit_mcp_task" : task, true );
         ctx.runStarted = true;
     }
     return ctx.activeRunId;
@@ -397,7 +431,7 @@ inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line,
 
     if( name == "codecortex_status" )
     {
-        const auto ident = rw::project::identify( effectiveRoot );
+        const auto ident = rw::project::identify( primaryRoot( effectiveRoot ) );
         rw::memory::MemoryServiceClient mem;
         const auto mh = mem.health();
         const std::string body =
@@ -409,6 +443,8 @@ inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line,
             "Agent: " + ( ident.agentId.empty() ? ( bridgeContext().hostName.empty() ? std::string( "not reported by host" ) : bridgeContext().hostName ) : ident.agentId ) + "\n"
             "Run: " + ( bridgeContext().activeRunId.empty() ? std::string( "no active coding run" ) : bridgeContext().activeRunId ) + "\n"
             "Dashboard: " + dashboardUrl() + "\n"
+            + ( workspaceFolders( effectiveRoot ).size() > 1
+                    ? "Projects (one combined workspace): " + displayRoots( effectiveRoot ) + "\n" : std::string() ) +
             "MCP tools: 42 available\n"
             "Memory: " + std::string( mh.ok ? "connected" : "unavailable" ) + "\n"
             + sessionTokenSummary();
@@ -428,7 +464,7 @@ inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line,
         const std::string task = mcpStringArg( args, "task" ).value;
         if( !task.empty() && r.resp.find( "\"error\"" ) == std::string::npos )
         {
-            const auto ident = rw::project::identify( effectiveRoot );
+            const auto ident = rw::project::identify( primaryRoot( effectiveRoot ) );
             rw::memory::MemoryServiceClient mem;
             rw::memory::RecallQuery q;
             q.query = task; q.project = ident.projectId; q.agentId = ident.agentId.empty() ? bridgeContext().hostName : ident.agentId; q.sessionId = ident.sessionId.empty() ? bridgeContext().connectionId : ident.sessionId; q.includeLessons = true; q.limit = 5;
@@ -457,7 +493,7 @@ inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line,
     {
         const std::string task = mcpStringArg( args, "task" ).value;
         if( task.empty() ) return { toolResult( id, "missing required field: task", true ), false, name };
-        const auto ident = rw::project::identify( effectiveRoot );
+        const auto ident = rw::project::identify( primaryRoot( effectiveRoot ) );
         rw::memory::RecallQuery q; q.query = task; q.project = ident.projectId; q.agentId = ident.agentId.empty() ? bridgeContext().hostName : ident.agentId; q.sessionId = ident.sessionId.empty() ? bridgeContext().connectionId : ident.sessionId; q.includeLessons = true; q.limit = 5;
         rw::memory::MemoryServiceClient mem; const auto mr = mem.smartRecall( q );
         if( mr.ok ) recordEvent( telemetryPath, effectiveRoot, runId, rw::telemetry::EventType::MemoryRecall,
@@ -475,7 +511,7 @@ inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line,
         static constexpr std::string_view allowed[] = { "pattern", "preference", "architecture", "bug", "workflow", "fact" };
         bool okType = false; for( auto t : allowed ) if( type == t ) okType = true;
         if( !okType ) return { toolResult( id, "invalid memory type", true ), false, name };
-        const auto ident = rw::project::identify( effectiveRoot );
+        const auto ident = rw::project::identify( primaryRoot( effectiveRoot ) );
         rw::memory::RememberRequest req; req.project = ident.projectId; req.agentId = ident.agentId; req.type = type;
         req.content = checkpoint + ( description.empty() ? std::string() : ": " + description );
         rw::memory::MemoryServiceClient mem; const auto mr = mem.remember( req );
@@ -547,8 +583,19 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
         {
             if( coveredFiles >= 200 ) return;
             std::error_code ec;
-            const std::filesystem::path p = std::filesystem::path( root ) / rel;
-            if( !std::filesystem::is_regular_file( p, ec ) || ec ) return;
+            std::filesystem::path p;
+            for( const auto& folder : workspaceFolders( root ) )
+            {
+                // single-root answers spell paths root-relative; multi-root ones as <folder-name>/<rel>
+                for( const auto& base : { std::filesystem::path( folder ), std::filesystem::path( folder ).parent_path() } )
+                {
+                    const auto candidate = base / rel;
+                    if( std::filesystem::is_regular_file( candidate, ec ) && !ec ) { p = candidate; break; }
+                    ec.clear();
+                }
+                if( !p.empty() ) break;
+            }
+            if( p.empty() ) return;
             const auto sz = std::filesystem::file_size( p, ec );
             if( ec || !creditedFiles.insert( p.lexically_normal().string() ).second ) return;
             coveredBytes += static_cast<std::int64_t>( sz ); ++coveredFiles;

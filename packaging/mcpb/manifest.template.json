@@ -33,9 +33,10 @@
   "user_config": {
     "project_folder": {
       "type": "directory",
-      "title": "Your code project folder",
-      "description": "The folder that holds the code you want Claude to work on (for example the folder you cloned from Git). You can change it later in Claude's extension settings.",
-      "required": true
+      "title": "Your code project folder(s)",
+      "description": "The folder(s) holding the code you want Claude to work on. Add up to 16; CodeCortex combines them into one workspace, so Claude can search and follow calls across all of them. Folders must not be inside each other. You can change this later in Claude's extension settings.",
+      "required": true,
+      "multiple": true
     }
   },
   "tools": [

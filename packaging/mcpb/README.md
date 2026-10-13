@@ -46,8 +46,8 @@ python3 scripts/build_mcpb.py --binary build/codecortex --ui ui --skills skills 
 
 ## Known limits
 
-- **One project folder at a time**, chosen in the install dialog (changeable in settings). Following whatever
-  project the user has open automatically is Step 3 of the setup plan (MCP roots).
+- **Several folders = one workspace.** The folder setting accepts up to 16 folders (not nested inside each
+  other); the engine merges them into one graph. quality_delta / prove_change stay single-project: pass `path`.
 - **Unsigned binaries** will trigger Windows SmartScreen / macOS Gatekeeper warnings until code signing is added
   to `release.yml`.
 - Host-hook telemetry is not part of the bundle; Claude desktop uses the MCP path only.
