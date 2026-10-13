@@ -319,6 +319,8 @@ async function renderAll(){
   renderOverview(); renderSessions(); renderMemories(); renderLessons(); renderActions(); renderCrystals(); await renderTimeline(); renderAudit(); renderActivity(); renderReplay(); renderHealth();
   if(state.activeView==='profile')await loadProfile();
   renderContext();
+  if(window.CodeCortexTokens)window.CodeCortexTokens.render();
+  if(window.CodeCortexStart)window.CodeCortexStart.render();
   if(window.CodeCortexGraph)window.CodeCortexGraph.update(contextEvents(),{projectId:state.activeProject,root:state.activeRoot});
 }
 async function load(forceMemory=false){

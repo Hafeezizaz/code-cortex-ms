@@ -538,6 +538,15 @@ int runServer( const ServerConfig& cfg )
             else if( target == "/app.js" ) { file = assets / "app.js"; type = "application/javascript; charset=utf-8"; }
             else if( target == "/graph.js" ) { file = assets / "graph.js"; type = "application/javascript; charset=utf-8"; }
             else if( target == "/styles.css" ) { file = assets / "styles.css"; type = "text/css; charset=utf-8"; }
+            else if( target == "/tokens.js" ) { file = assets / "tokens.js"; type = "application/javascript; charset=utf-8"; }
+            else if( target == "/start.js" ) { file = assets / "start.js"; type = "application/javascript; charset=utf-8"; }
+            else if( target == "/pricing.json" )
+            {
+                // List prices ship with the UI; a team with negotiated rates points CODECORTEX_PRICING_FILE at its
+                // own copy (same format) instead of editing the shipped one.
+                file = assets / "pricing.json"; type = "application/json; charset=utf-8";
+                if( const char* own = std::getenv( "CODECORTEX_PRICING_FILE" ); own && *own ) file = own;
+            }
             else if( target == "/codecortex-logo-header.png" ) { file = assets / "codecortex-logo-header.png"; type = "image/png"; }
             else if( target == "/codecortex-logo.png" ) { file = assets / "codecortex-logo.png"; type = "image/png"; }
             if( file.empty() ) respond( fd, "404 Not Found", "text/plain; charset=utf-8", "not found\n" );
