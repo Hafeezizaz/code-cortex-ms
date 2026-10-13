@@ -51,6 +51,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     for a in ("--binary", "--ui", "--skills", "--hooks", "--version", "--platform", "--out"):
         ap.add_argument(a, required=a not in ("--skills", "--hooks"))
+    # Also drop manifest.json + icon.png into an unpacked folder with the same layout, so Claude's
+    # "Install unpacked extension" works on the extracted release zip (a fallback for Claude Desktop builds
+    # whose .mcpb install dialog does not complete).
+    ap.add_argument("--manifest-out")
     a = ap.parse_args()
     if a.platform not in ("win32", "darwin"):
         sys.exit("build_mcpb: --platform must be win32 or darwin (Claude desktop runs on these two only)")
@@ -75,6 +79,10 @@ def main() -> int:
         for opt, arc in ((a.skills, "share/codecortex/skills"), (a.hooks, "share/codecortex/hooks")):
             if opt and Path(opt).is_dir():
                 add_tree(z, Path(opt), arc)
+    if a.manifest_out:
+        d = Path(a.manifest_out); d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8")
+        (d / "icon.png").write_bytes(ICON.read_bytes())
     print(f"build_mcpb: wrote {out} ({out.stat().st_size // 1024} KiB, platform {a.platform}, v{a.version})")
     return 0
 

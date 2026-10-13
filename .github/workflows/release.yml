@@ -334,8 +334,13 @@ jobs:
           version="${asset#codecortex-}"; version="${version%-windows-x64}"
           python scripts/build_mcpb.py --binary "$root/bin/codecortex.exe" --ui "$root/share/codecortex/ui" \
             --skills "$root/share/codecortex/skills" --hooks "$root/share/codecortex/hooks" \
-            --version "$version" --platform win32 --out "dist/${asset}.mcpb"
+            --version "$version" --platform win32 --out "dist/${asset}.mcpb" --manifest-out "$root"
           ( cd dist && sha256sum "${asset}.mcpb" > "${asset}.mcpb.sha256" )
+          # The unzipped release folder is now ALSO an unpacked extension (manifest.json at its root, same
+          # bin/ + share/ layout as the .mcpb): Claude → Settings → Extensions → Install unpacked extension.
+          rm -f "dist/${asset}.zip" "dist/${asset}.zip.sha256"
+          ( cd dist && 7z a -tzip "${asset}.zip" "${asset}" >/dev/null )
+          ( cd dist && sha256sum "${asset}.zip" > "${asset}.zip.sha256" )
 
       - uses: actions/upload-artifact@v4
         with:
