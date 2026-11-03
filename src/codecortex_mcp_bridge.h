@@ -8,6 +8,7 @@
 #include "project_identity.h"
 #include "telemetry/collector.h"
 #include "telemetry/session_meter.h"
+#include "telemetry/reflex.h"
 #include "ui/server.h"
 
 #include <algorithm>
@@ -678,6 +679,18 @@ inline McpDispatchResult dispatchCodeCortexMcpLine( const std::string& line, int
     meter.answersTokens += answerTokens;
     meter.avoidedTokens += avoided;
 
+    // Runtime reflexes (bench/benchpack): retry storm, no-progress repeats and huge answers get one short corrective
+    // note appended to the result. Advice only: the answer itself is never changed or withheld.
+    if( name != "codecortex_status" )
+    {
+        const bool suppressed = detail.rfind( "repeat_suppressed", 0 ) == 0;
+        if( const auto note = rw::telemetry::reflex::sessionMonitor().afterCall( name, ok, answerTokens, suppressed ) )
+        {
+            const std::string item = "{\"type\":\"text\",\"text\":\"" + mcpdetail::jsonEscape( note->text ) + "\"}";
+            if( appendArrayItem( r.resp, "content", item ) ) detail += " reflex=" + note->code;
+        }
+    }
+
     if( !telemetryPath.empty() && !ctx.activeRunId.empty() && name != "codecortex_status" )
     {
         rw::telemetry::Collector c( telemetryPath );
@@ -807,7 +820,9 @@ inline int runCodeCortexMcp( int topK, bool stable, bool noRedact,
             const std::string caps = mcpdetail::findObject( mcpdetail::findObject( line, "params" ), "capabilities" );
             clientHasRoots = caps.find( "\"roots\"" ) != std::string::npos;
         }
+        McpStdoutQuarantine stdoutQuarantine;
         const auto r = dispatchCodeCortexMcpLine( line, topK, stable, noRedact, policy, telemetryPath );
+        (void)stdoutQuarantine.finish();
         if( !r.isNotification )
         {
             std::fputs( r.resp.c_str(), stdout ); std::fputc( '\n', stdout ); std::fflush( stdout );

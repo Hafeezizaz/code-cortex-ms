@@ -25,7 +25,7 @@ function provenanceLabel(source, fallback='OBSERVED'){
 }
 function provenanceClass(label){ return String(label||'not available').toLowerCase().replaceAll('_','-').replaceAll(' ','-'); }
 function provenanceBadge(label){ label=label||'NOT AVAILABLE'; return `<span class="provenance-badge ${provenanceClass(label)}">${esc(label)}</span>`; }
-function setMetricSource(id,label){ const el=$(id); if(el)el.textContent=label||'NOT AVAILABLE'; }
+function setMetricSource(id,label){ const el=$(id); if(el)el.textContent=(!label||label==='NOT AVAILABLE')?'no data yet':label; }
 function runEvidence(events){
   const ev=events||[], tools=ev.filter(e=>e.type==='tool_call'), reads=ev.filter(e=>e.type==='file_read'), searches=ev.filter(e=>e.type==='search');
   const repeatedCount=list=>{const counts=new Map();list.forEach(e=>{const k=String(e.target||'').trim();if(k)counts.set(k,(counts.get(k)||0)+1)});return [...counts.values()].reduce((n,c)=>n+Math.max(0,c-1),0)};
@@ -149,14 +149,14 @@ function renderOverview(){
   ['tokensSource','toolCallsSource','repeatSource','durationSource','currentToolSource','toolFailuresSource'].forEach(id=>setMetricSource(id,'NOT AVAILABLE'));
   if(!run){
     $('runId').textContent='No run telemetry yet';
-    $('tokens').textContent='Not reported by host'; $('toolCalls').textContent='—'; $('repeat').textContent='—'; $('duration').textContent='—'; $('currentTool').textContent='—'; $('toolFailures').textContent='—';
+    $('tokens').textContent='—'; $('toolCalls').textContent='—'; $('repeat').textContent='—'; $('duration').textContent='—'; $('currentTool').textContent='—'; $('toolFailures').textContent='—';
     $('productivitySignal').innerHTML='<div class="empty">Observed productivity signals will appear when run telemetry is available.</div>';
     $('verificationStatus').innerHTML='<div class="empty">Impact, test and proof evidence will appear here.</div>';
   } else {
     $('runId').textContent=run.start.run_id;
     const x=runEvidence(run.events), tokens=x.inputTokens+x.outputTokens, finish=run.events.find(e=>e.type==='run_finished');
     const tokenSource=x.tokenEvents.length?provenanceLabel(x.tokenEvents.slice().reverse().find(e=>e.source)?.source,'PROVIDER-REPORTED'):'NOT AVAILABLE';
-    $('tokens').textContent=x.tokenEvents.length?fmtInt(tokens):'Not reported by host'; setMetricSource('tokensSource',tokenSource);
+    $('tokens').textContent=x.tokenEvents.length?fmtInt(tokens):'—'; setMetricSource('tokensSource',tokenSource);
     $('toolCalls').textContent=String(x.tools.length); setMetricSource('toolCallsSource',x.tools.length?'OBSERVED':'NOT AVAILABLE');
     $('currentTool').textContent=x.tools.length?(x.tools[x.tools.length-1].target||'Observed tool'):(finish?'Run finished':'No tool observed'); setMetricSource('currentToolSource',x.tools.length?'OBSERVED':'NOT AVAILABLE');
     $('toolFailures').textContent=String(x.failures); setMetricSource('toolFailuresSource',x.tools.length?'OBSERVED':'NOT AVAILABLE');
