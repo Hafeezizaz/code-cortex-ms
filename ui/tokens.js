@@ -86,7 +86,7 @@
   // ---- "Exact usage" card: one-click turn on/off for the local OpenTelemetry receiver ----
   let otel=null, otelSig='', otelBusy=false;
   function otelRefresh(){
-    fetch('/api/otel',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(j=>{ otel=j; drawOtel(); }).catch(()=>{});
+    fetch('/api/otel',{cache:'no-store'}).then(r=>r.ok?r.json():{unavailable:true}).then(j=>{ otel=j; drawOtel(); }).catch(()=>{ otel={unavailable:true}; drawOtel(); });
   }
   function otelAct(kind){
     if(otelBusy)return; otelBusy=true; drawOtel(true);
@@ -98,7 +98,8 @@
     const sig=JSON.stringify(otel)+otelBusy; if(sig===otelSig&&!force)return; otelSig=sig;
     const o=otel;
     let status, body, button='';
-    if(o.managed){ status='Managed by your organisation'; body='Claude Code’s telemetry settings are controlled by IT, so CodeCortex will not change them.'; }
+    if(o.unavailable){ status='Not in this version'; body='This CodeCortex program is older than this dashboard, so the exact-usage switch cannot work yet. Install the latest CodeCortex build, then reopen this page.'; }
+    else if(o.managed){ status='Managed by your organisation'; body='Claude Code’s telemetry settings are controlled by IT, so CodeCortex will not change them.'; }
     else if(o.events>0){ status='Receiving'; body=`${fmtInt(o.events)} request(s) recorded with Claude Code’s own token counts and cost. Last: ${esc(fmtTime(o.last_event_ms))}.`; button='off'; }
     else if(o.enabled&&o.configured){ status='On, waiting for Claude Code'; body='Reopen Claude Code once, then send a message. Usage will appear here.'; button='off'; }
     else if(o.conflict){ status='Needs attention'; body=esc(o.conflict); }

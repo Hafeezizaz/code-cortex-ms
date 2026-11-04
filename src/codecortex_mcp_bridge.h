@@ -567,8 +567,12 @@ inline McpDispatchResult dispatchCodeCortexMcpLineCore( const std::string& line,
     {
         McpDispatchResult q = dispatchMcpLine( replaceToolName( line, name, "quality_delta" ), topK, stable, noRedact, policy );
         McpDispatchResult s = dispatchMcpLine( replaceToolName( line, name, "situational_awareness" ), topK, stable, noRedact, policy );
-        const std::string qt = mcpdetail::findString( q.resp, "text" );
-        const std::string st = mcpdetail::findString( s.resp, "text" );
+        // A refusal can arrive as a JSON-RPC error (reason under "message") with no "text" at all; without this
+        // fallback the combined answer showed only the section headings and hid the reason.
+        std::string qt = mcpdetail::findString( q.resp, "text" );
+        if( qt.empty() ) qt = mcpdetail::findString( q.resp, "message" );
+        std::string st = mcpdetail::findString( s.resp, "text" );
+        if( st.empty() ) st = mcpdetail::findString( s.resp, "message" );
         const bool ok = q.resp.find( "\"error\"" ) == std::string::npos && s.resp.find( "\"error\"" ) == std::string::npos;
         recordEvent( telemetryPath, effectiveRoot, runId, rw::telemetry::EventType::ProofCheck,
                      "change proof", "analysis_gate_only; test execution must be separately observed", ok );
