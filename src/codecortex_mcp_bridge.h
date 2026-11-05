@@ -220,6 +220,29 @@ inline void recordEvent( std::string_view telemetryPath, std::string_view root, 
     e.detail.assign( detail );
     e.success = success;
     c.record( e );
+
+    // The dashboard log above belongs to the folder CodeCortex was started in. When this call is about a different
+    // project folder (the assistant passed its own `path`), also keep a copy in THAT project's .codecortex so each
+    // project carries its own history. Skipped when a log file is pinned by CODECORTEX_TELEMETRY_FILE, when the
+    // folder does not exist (never create a folder at a mistyped path) and when it is the same file.
+    const char* pinned = std::getenv( "CODECORTEX_TELEMETRY_FILE" );
+    if( !( pinned && *pinned ) )
+    {
+        const std::string projectRoot = primaryRoot( root );
+        std::error_code ec;
+        if( !projectRoot.empty() && std::filesystem::is_directory( projectRoot, ec ) )
+        {
+            const std::string mirror = telemetryPathFor( projectRoot );
+            std::error_code same;
+            const bool isSameFile = std::filesystem::exists( mirror, same ) && std::filesystem::exists( std::string( telemetryPath ), same )
+                                    && std::filesystem::equivalent( mirror, std::string( telemetryPath ), same );
+            if( mirror != telemetryPath && !isSameFile )
+            {
+                rw::telemetry::Collector m( mirror );
+                if( m.enabled() ) m.record( e );
+            }
+        }
+    }
 }
 
 inline void finishActiveRun( std::string_view telemetryPath, bool success, std::string_view reason = {} )
