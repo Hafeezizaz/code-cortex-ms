@@ -18,7 +18,7 @@
 - **whereis:** a zero over committed trees for a symbol the working tree defines now says
   `r="working-tree-only"` instead of looking like a missing symbol.
 - **Dashboard status page:** optional items that are off (usage and activity not shared by the AI app, the
-  optional shared memory service) show a grey "not used here" instead of amber "needs a look".
+  optional shared memory service) are no longer shown as amber "needs a look"; they appear only when working.
 - **Docs and setup:** dashboard port can move to 7332/7333; `CONNECT_GEMINI_CODEX.bat` registers the build with
   Gemini CLI and Codex CLI.
 
