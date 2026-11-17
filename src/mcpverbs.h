@@ -580,6 +580,9 @@ inline std::string whereisText( const std::string& root, const std::string& symb
     if( res.hits.empty() )
     {
         res.nearMiss = didYouMean( getIndex( root ).ing, sel );
+        // A zero over the COMMITTED trees while the working-tree index defines the name = an uncommitted
+        // symbol, not a missing one. Lazy like the near-miss: computed only on the zero.
+        res.workingTreeOnly = !resolveAllByNameQualified( getIndex( root ).ing, sel ).empty();
     }
     return captureXml( [ & ]( std::FILE* f ) { crossref::writeWhereisPage( f, res, maxHits, page.limit, page.offset ); } );
 }
