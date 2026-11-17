@@ -331,15 +331,21 @@ function renderHealth(){
     ['MCP',dep.mcp_active===true,dep.mcp_active===true?`${dep.mcp_transport||'connected'} · ${dep.mcp_local_only!==false?'local':'non-loopback'}`:'UI-only process'],
     ['Repository graph',state.health.capabilities?.graph===true,'deterministic local code intelligence'],
     ['Telemetry',state.telemetryInfo.available===true,state.telemetryInfo.available===true?(state.telemetryInfo.source||state.health.telemetry||'available'):(state.telemetryInfo.source||state.health.telemetry||'not configured')],
-    ['Host run observation',hostObserved,hostObserved?'host lifecycle/tool events captured':'conditional: host adapter/hooks not reporting'],
-    ['Token telemetry',tokenObserved,tokenObserved?'host/provider reported usage':'not reported by host'],
-    ['CodeCortex Memory',memAvailable(),state.health.memory?.error||'connected'],
+    // The 4th field marks a card OPTIONAL: when it is off, that is expected (the AI app does not share this,
+    // or an optional service is not set up), so it shows a neutral "not used here", never amber.
+    ['Host run observation',hostObserved,hostObserved?'host lifecycle/tool events captured':'conditional: host adapter/hooks not reporting',true],
+    ['Token telemetry',tokenObserved,tokenObserved?'host/provider reported usage':'not reported by host',true],
+    ['CodeCortex Memory',memAvailable(),state.health.memory?.error||'connected',true],
     ['Project',!!state.activeProject,state.health.project_name||state.activeProject||'unknown'],
     ['Repository',!!state.activeRoot,state.activeRoot||state.health.root||'unknown'],
     ['Graph UI',!!window.CodeCortexGraph,'neural graph runtime loaded'],
     ['Run snapshots',localCrystals().length>0,`${localCrystals().length} completed runs`]
   ];
-  $('healthCards').innerHTML=statuses.map(([name,ok,detail])=>`<div class="status-card ${ok?'ok':'warn'}"><span>${esc(name)}</span><strong>${ok?'●':'○'} ${ok?'ready':'attention'}</strong><small>${esc(detail)}</small></div>`).join('');
+  $('healthCards').innerHTML=statuses.map(([name,ok,detail,optional])=>{
+    const cls=ok?'ok':(optional?'off':'warn');
+    const label=ok?'● ready':(optional?'○ not used here':'○ attention');
+    return `<div class="status-card ${cls}"><span>${esc(name)}</span><strong>${label}</strong><small>${esc(detail)}</small></div>`;
+  }).join('');
   const steps=[
     ['Coding host',hostObserved?'observed':'connected through MCP','Codex / Claude / Gemini / generic MCP host'],
     ['CodeCortex MCP',dep.mcp_active?dep.mcp_transport||'active':'not active in this process','single local intelligence surface'],
